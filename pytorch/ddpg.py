@@ -103,12 +103,12 @@ def update(mu, mu_target, q, q_target, memory, q_optimizer, mu_optimizer):
     s,a,r,s_prime,done_mask  = memory.sample(batch_size)
     
     target = r + gamma * q_target(s_prime, mu_target(s_prime))
-    q_loss = F.smooth_l1_loss(q(s,a), target.detach())
+    q_loss = F.smooth_l1_loss(q(s, a), target.detach())
     q_optimizer.zero_grad()
     q_loss.backward()
     q_optimizer.step()
     
-    mu_loss = -q(s,mu(s)).mean() # That's all for the policy loss.
+    mu_loss = -q(s, mu(s)).mean() # That's all for the policy loss.
     mu_optimizer.zero_grad()
     mu_loss.backward()
     mu_optimizer.step()
@@ -149,7 +149,7 @@ def train():
             if done:
                 break              
                 
-        if memory.size()>train_threshold:
+        if memory.size() > train_threshold:
             for i in range(update_epoch):
                 update(mu, mu_target, q, q_target, memory, q_optimizer, mu_optimizer)
                 soft_update(mu, mu_target)

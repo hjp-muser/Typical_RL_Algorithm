@@ -8,18 +8,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-learning_rate = 0.0001 #0.0001
+learning_rate = 0.0001  # 0.0001
 N_episode = 10000
 max_epsilon = 0.08
-min_epsilon = 0.01  #0.01
+min_epsilon = 0.01  # 0.01
 T = 600
 train_threshold = 2000
 update_epoch = 10
 copy_time = 50
 SAVE_PATH = 'model/dqn.pt'
-batch_size = 32  #32
+batch_size = 32  # 32
 buffer_limit = 50000
 gamma = 0.99
+
 
 class Qnet(nn.Module):
     def __init__(self):
@@ -41,7 +42,7 @@ class Qnet(nn.Module):
             return out.argmax().item()
 
 
-class ReplayBuffer():
+class ReplayBuffer:
     def __init__(self):
         self.buffer = collections.deque(maxlen=buffer_limit)
 
@@ -61,27 +62,29 @@ class ReplayBuffer():
             done_mask_lst.append([done_mask])
 
         return torch.tensor(s_lst, dtype=torch.float), \
-                torch.tensor(a_lst), \
-                torch.tensor(r_lst, dtype=torch.float), \
-                torch.tensor(s_prime_lst, dtype=torch.float), \
-                torch.tensor(done_mask_lst)
+               torch.tensor(a_lst), \
+               torch.tensor(r_lst, dtype=torch.float), \
+               torch.tensor(s_prime_lst, dtype=torch.float), \
+               torch.tensor(done_mask_lst)
 
     def size(self):
         return len(self.buffer)
+
 
 def update(q, q_target, memory, optimizer):
     for i in range(update_epoch):
         s, a, r, s_prime, done_mask = memory.sample(batch_size)
 
         q_out = q(s)
-        q_a = q_out.gather(1,a)
+        q_a = q_out.gather(1, a)
         max_q_prime = q_target(s_prime).max(1)[0].unsqueeze(1)
         target = r + gamma * max_q_prime * done_mask
         loss = F.smooth_l1_loss(q_a, target)
-        
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
 
 def train():
     f = open('score/dqn_score.txt', 'a')
@@ -98,14 +101,14 @@ def train():
 
     for n_epi in range(N_episode):
         # epsilon = max(min_epsilon, max_epsilon - 0.01  * (n_epi / 200))
-        epsilon = max(min_epsilon, max_epsilon - (max_epsilon - min_epsilon)  * (n_epi / N_episode))
+        epsilon = max(min_epsilon, max_epsilon - (max_epsilon - min_epsilon) * (n_epi / N_episode))
         s = env.reset()
 
         for t in range(T):
             a = q.sample_action(torch.from_numpy(s).float(), epsilon)
             s_prime, r, done, info = env.step(a)
             done_mask = 0.0 if done else 1.0
-            memory.put((s,a,r,s_prime,done_mask))
+            memory.put((s, a, r, s_prime, done_mask))
             s = s_prime
 
             score += r
@@ -115,21 +118,21 @@ def train():
         if memory.size() > 2000:
             update(q, q_target, memory, optimizer)
 
-        if n_epi%copy_time == 0:
+        if n_epi % copy_time == 0:
             q_target.load_state_dict(q.state_dict())
 
-        if n_epi%print_interval==0 and n_epi!=0:
+        if n_epi % print_interval == 0 and n_epi != 0:
             print("# of episode :{}, avg score : {:.1f}, buffer size : {}, epsilon : {:.1f}%".format(
-                  n_epi, score/print_interval, memory.size(), epsilon*100))
-            f.write(str(score/print_interval) + ' ')
+                n_epi, score / print_interval, memory.size(), epsilon * 100))
+            f.write(str(score / print_interval) + ' ')
             score = 0.0
 
     torch.save(
-    {
-        'q_state_dict': q.state_dict(),
-        'q_target_state_dict': q_target.state_dict(),
-        'optim_state_dict': optimizer.state_dict()
-    }, SAVE_PATH)
+        {
+            'q_state_dict': q.state_dict(),
+            'q_target_state_dict': q_target.state_dict(),
+            'optim_state_dict': optimizer.state_dict()
+        }, SAVE_PATH)
     env.close()
     f.close()
 
@@ -140,7 +143,7 @@ def evaluate():
     q.load_state_dict(checkpoint['q_state_dict'])
     q.eval()
     env = gym.make('CartPole-v1')
-    while(1):
+    while (1):
         s = env.reset()
         done = False
         score = 0.0
@@ -148,12 +151,13 @@ def evaluate():
             a = q.sample_action(torch.from_numpy(s).float(), min_epsilon)
             s_prime, r, done, info = env.step(a)
             score += r
-            env.render()    
+            env.render()
             s = s_prime
         print('score: ', score)
         print('done!')
 
     env.close()
+
 
 def main():
     parser = argparse.ArgumentParser()

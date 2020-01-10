@@ -1,150 +1,150 @@
+import argparse
+import time
+
+import gym
 import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distribution.Normal as Normal
+from torch import optim
 from torch.autograd import Variable
-from utils import *
+
+from Utils.normalization import NormFilter
+from Utils.memory import Memory
+from Utils.conjugate_gradient import conjugate_gradient, fvp
+from Utils.soft_update import soft_update
+
 device = torch.device("cpu" if torch.cuda.is_available() else "cpu")
 
-class PI_net(nn.Module):
+
+SAVE_PATH = 'model/trpo.pt'
+INPUT_DIM = 3
+OUTPUT_DIM = 1
+EPISODE_LENGTH = 300
+EPISODE_NUM = 5000
+BATCH_SIZE = 32
+GAMMA = 0.995
+TAU = 0.9
+VALUE_LR = 0.0001
+FVP_DAMPING = 0.01
+SOFT_UPDATE_TAU = 0.005
+
+
+class Policy(nn.Module):
+
     def __init__(self):
-        super(PI_net, self).__init__()
-        self.fc_1 = nn.Linear(3, 128)
+        super(Policy, self).__init__()
+        self.fc_1 = nn.Linear(INPUT_DIM, 128)
         self.fc_2 = nn.Linear(128, 32)
-        self.fc_mu = nn.Linear(32, 1)
-        self.fc_sigma = nn.Linear(32, 1)
+        self.mu = nn.Linear(32, OUTPUT_DIM)
+        self.mu.weight.data.mul_(0.1)
+        self.mu.bias.data.mul_(0.0)
+        self.log_std = nn.Parameter(torch.zeros(1, OUTPUT_DIM))
+
+    def forward(self, s):
+        # s = s.to(device)
+        s = F.relu(self.fc_1(s))
+        s = F.relu(self.fc_2(s))
+        # mu = torch.tanh(self.mu(s))
+        mu = self.mu(s)
+        log_std = self.log_std.expand_as(mu)
+        std = torch.exp(log_std)
+        return mu, log_std, std
+
+
+class Value(nn.Module):
+
+    def __init__(self):
+        super(Value, self).__init__()
+        self.fc_1 = nn.Linear(INPUT_DIM, 128)
+        self.fc_2 = nn.Linear(128, 64)
+        self.value = nn.Linear(64, OUTPUT_DIM)
+        self.value.weight.data.mul_(0.1)
+        self.value.weight.data.mul_(0.0)
     
     def forward(self, s):
-        s = s.to(device)
+        # s = s.to(device)
         s = F.relu(self.fc_1(s))
         s = F.relu(self.fc_2(s))
-        mu = torch.tanh(self.fc_mu(s))
-        sigma = F.softplus(self.fc_sigma(s))
-        pi_dist = Normal(mu, sigma)
-        return pi_dist
+        state_value = self.value(s)
+        return state_value
 
-class V_net(nn.Module):
+
+class TRPO:
     def __init__(self):
-        super(V_net, self).__init__()
-        self.fc_1 = nn.Linear(3, 128)
-        self.fc_2 = nn.Linear(128, 32)
-        self.fc_v = nn.Linear(32, 1)
-    
-    def forward(self, s)
-        s = s.to(device)
-        s = F.relu(self.fc_1(s))
-        s = F.relu(self.fc_2(s))
-        v = self.fc_mu(s)
-        return v
+        self.pi = Policy()
+        self.old_pi = Policy()
+        self.value = Value()
+        self.v_optimizer = optim.Adam(self.value.parameters(), lr=VALUE_LR)
 
-class TRPO():
-    def __init__(self):
-        pi_net = PI_net()
-        old_pi_net = PI_net()
-        V_net = V_net()
+    def choose_action(self, state):
+        action_mean, _, action_std = self.pi(state)
+        action = torch.normal(action_mean, action_std)
+        return action
 
-    def put_data(self, transition):
-        self.data.append(transition)
-        
-    def make_batch(self):
-        s_lst, a_lst, r_lst, s_prime_lst, done_lst = [], [], [], [], []
-        for transition in self.data:
-            s, a, r, s_prime, done = transition
-            s_lst.append(s)
-            a_lst.append([a])
-            r_lst.append([r])
-            s_prime_lst.append(s_prime)
-            done_mask = 0 if done else 1
-            done_lst.append([done_mask])
-        disc_r_lst = []
-        r_lst = np.array(r_lst)
-        # 利用 V 网络对当前状态的值进行估计，求折扣回报
-        disc_r = self.vn(torch.tensor([s_prime_lst[-1]], dtype=torch.float)) 
-        for r in r_lst[::-1]:
-            disc_r = r[0] + gamma * disc_r  # * done_lst[-1][0]
-            disc_r_lst.append([disc_r])
-        disc_r_lst.reverse()
+    def get_action_loss(self, states, advantages):
+        pi_mu, pi_std, pi_logstd = self.pi(states)
+        old_pi_mu, old_pi_std, old_pi_logstd = self.old_pi(states)
+        ratio = torch.exp(pi_logstd - old_pi_logstd.detach())
+        action_loss = -ratio * advantages
+        return action_loss.mean()
 
-        s,a,disc_r,s_prime,done_mask = torch.tensor(s_lst, dtype=torch.float), torch.tensor(a_lst), \
-                                          torch.tensor(disc_r_lst), torch.tensor(s_prime_lst, dtype=torch.float), \
-                                          torch.tensor(done_lst, dtype=torch.float)
-        self.data = []
-        return s, a, disc_r, s_prime, done_mask
+    def get_kl(self, state):
+        mean1, log_std1, std1 = self.pi(state)
 
-    def get_kl():
-        mean1, log_std1, std1 = policy_net(Variable(states))
-
-        mean0 = Variable(mean1.data)
-        log_std0 = Variable(log_std1.data)
-        std0 = Variable(std1.data)
+        # mean0 = Variable(mean1.data)
+        mean0 = torch.tensor(mean1)
+        log_std0 = torch.tensor(log_std1)
+        # std0 = Variable(std1.data)
+        std0 = torch.tensor(std1)
         kl = log_std1 - log_std0 + (std0.pow(2) + (mean0 - mean1).pow(2)) / (2.0 * std1.pow(2)) - 0.5
         return kl.sum(1, keepdim=True)
 
-    
-    def get_loss(self, s, advantage):
-        pi_log_prob = pi_net(s)
-        old_pi_log_prob = old_pi_net(s)
-        ratio = torch.exp(pi_dist.log_prob(a) - old_pi_dist.log_prob(a).detach())
-        aloss = -ratio * advantage
-        return aloss
-    
-    def Fvp(self, v):
-            kl = get_kl()
-            kl = kl.mean()
+    def update(self, batch):
+        states, actions, rewards, state_primes, done_masks = batch
 
-            grads = torch.autograd.grad(kl, model.parameters(), create_graph=True)
-            flat_grad_kl = torch.cat([grad.view(-1) for grad in grads])
+        values = self.value(states)
+        returns = torch.empty(rewards.size(0), 1)
+        deltas = torch.empty(rewards.size(0), 1)
+        advantages = torch.empty(rewards.size(0), 1)
+        prev_return = 0
+        prev_value = 0
+        prev_advantage = 0
 
-            kl_v = (flat_grad_kl * Variable(v)).sum()
-            grads = torch.autograd.grad(kl_v, model.parameters())
-            flat_grad_grad_kl = torch.cat([grad.contiguous().view(-1) for grad in grads]).data
-
-            return flat_grad_grad_kl + v * damping
-
-    def conjugate_gradients(self, Avp, b, nsteps, residual_tol=1e-10):
-        x = torch.zeros(b.size())
-        r = b.clone()
-        p = b.clone()
-        rdotr = torch.dot(r, r)
-        for i in range(nsteps):
-            _Avp = Avp(p)
-            alpha = rdotr / torch.dot(p, _Avp)
-            x += alpha * p
-            r -= alpha * _Avp
-            new_rdotr = torch.dot(r, r)
-            betta = new_rdotr / rdotr
-            p = r + betta * p
-            rdotr = new_rdotr
-            if rdotr < residual_tol:
-                break
-    return x
-
-    def update(self):
-        self.old_pi.load_state_dict(self.pi.state_dict())
-
-        s, a, disc_r, s_prime, done_mask = self.make_batch()
-        td_target = disc_r
         # TD0
-        advantage = td_target - self.vn(s)
-        advantage = advantage.detach()
+        for i in reversed(range(rewards.size(0))):
+            returns[i] = rewards[i] + GAMMA * prev_return * done_masks[i]
+            deltas[i] = rewards[i] + GAMMA * prev_value * done_masks[i] - values[i]
+            advantages[i] = deltas[i] + GAMMA * TAU * prev_advantage * done_masks[i]
 
-        aloss = get_loss(s, advantage)
-        aloss = aloss.to(device)
-        aloss_grad = torch.autograd.grad(aloss, pi_net.parameters())
+            prev_return = returns[i][0]
+            prev_value = values[i][0]
+            prev_advantage = advantages[i][0]
+
+        # update value net
+        targets = returns
+        v_loss = F.smooth_l1_loss(values, targets.detach())
+        self.v_optimizer.zero_grad()
+        v_loss.mean().backward()
+        self.v_optimizer.step()
+
+        # update policy net using TRPO
+        a_loss = self.get_action_loss(states, advantages)
+        a_loss.mean().backward()
+        a_loss_grad = a_loss.grad
 
         # 利用共轭梯度算法计算梯度方向
-        stepdir = conjugate_gradients(-aloss_grad, 10)
+        step_dir = conjugate_gradient(self.get_kl(), -a_loss_grad, 10, FVP_DAMPING)
 
-        shs = (stepdir * Fvp(stepdir)).sum(0, keepdim=True)
+        shs = (step_dir * fvp(self.get_kl(), step_dir)).sum(0, keepdim=True)
         max_kl = 0
         # 拉格朗日乘子
         lm = 2 * torch.sqrt(max_kl / shs)
 
-        fullstep = stepdir / lm
+        fullstep = step_dir / lm
 
-        neggdotstepdir = (-loss_grad * stepdir).sum(0, keepdim=True)
+        neggdotstepdir = (-loss_grad * step_dir).sum(0, keepdim=True)
         print(("lagrange multiplier:", lm[0], "grad_norm:", loss_grad.norm()))
 
         prev_params = get_flat_params_from(model)
@@ -155,35 +155,64 @@ class TRPO():
 
 def train():
     env = gym.make('Pendulum-v0')
-    model = TRPO()
+    norm_filter_state = NormFilter((INPUT_DIM,), clip=5)
+    # norm_filter_reward = NormFilter((1,), decorate_mean=False, clip=10)
+    trpo_model = TRPO()
     score = 0.0
     print_interval = 20
 
-    for n_epi in range(N):
+    for n_epi in range(EPISODE_NUM):
         s = env.reset()
-        done = False
-        # for t in range(200):
-        while not done:
-            for _ in range(batch_size):
-                a= model.choose_action(s)
-                s_prime, r, done, info = env.step(a)
-                model.put_data((s, a, (r+8)/8, s_prime, done))
-                s = s_prime
+        s = norm_filter_state(s)
+        memory = Memory()
+        for _ in range(EPISODE_LENGTH):
+            a = trpo_model.choose_action(s)
+            a = a.float()
+            s_prime, r, done, info = env.step(a)
+            s_prime = norm_filter_state(s_prime)
+            memory.put((s, a, (r+8)/8, s_prime, 1 - done))
+            s = s_prime
 
-                score += r
+            score += r
 
-                if done:
-                    break
-            # if (t+1) % batch_size == 0 or t == 200-1:
-            model.update()
+            if done:
+                break
 
-        if n_epi%print_interval==0 and n_epi!=0:
+        batch = memory.sample_all()
+        trpo_model.update(batch)
+        soft_update(trpo_model.old_pi, trpo_model.pi, SOFT_UPDATE_TAU)
+        if n_epi % print_interval == 0 and n_epi != 0:
             print("# of episode :{}, avg score : {:.1f}".format(n_epi, score/print_interval))
             score = 0.0
 
     torch.save({
-        'ppo_model_dict': model.state_dict(),
+        'trpo_model_pi_dict': trpo_model.pi.state_dict(),
+        'trpo_model_value_dict': trpo_model.value.state_dict(),
         }, SAVE_PATH)
+
+    env.close()
+
+
+def evaluate():
+    env = gym.make('Pendulum-v0')
+    checkpoint = torch.load(SAVE_PATH)
+    pi = Policy()
+    pi.load_state_dict(checkpoint['pi_state_dict'])
+    pi.eval()
+    start = time.time()
+    end = time.time()
+    while end - start < 60:
+        s = env.reset()
+        done = False
+        reward_sum = 0
+        while not done:
+            a = pi(torch.from_numpy(s).float())
+            s_prime, r, done, info = env.step([a.item()])
+            env.render()
+            s = s_prime
+            reward_sum += r
+        print('done! reward = ', reward_sum)
+        end = time.time()
 
     env.close()
 
