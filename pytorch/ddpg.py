@@ -108,7 +108,7 @@ def update(mu, mu_target, q, q_target, memory, q_optimizer, mu_optimizer):
     q_loss.backward()
     q_optimizer.step()
     
-    mu_loss = -q(s, mu(s)).mean() # That's all for the policy loss.
+    mu_loss = -q(s, mu(s)).mean()  # That's all for the policy loss.
     mu_optimizer.zero_grad()
     mu_loss.backward()
     mu_optimizer.step()
@@ -132,7 +132,7 @@ def train():
     print_interval = 20
 
     mu_optimizer = optim.Adam(mu.parameters(), lr=lr_mu)
-    q_optimizer  = optim.Adam(q.parameters(), lr=lr_q)
+    q_optimizer = optim.Adam(q.parameters(), lr=lr_q)
     ou_noise = OrnsteinUhlenbeckNoise(mu=np.zeros(1))
 
     for n_epi in range(N):
