@@ -19,21 +19,24 @@ from Utils.soft_update import soft_update
 from Utils.flatten import get_flat_params_from, set_flat_params_to
 from Utils.distribution import normal_log_distribution
 
-# device = torch.device("cpu" if torch.cuda.is_available() else "cpu")
+import pickle
 
+# device = torch.device("cpu" if torch.cuda.is_available() else "cpu")
 
 SAVE_PATH = 'model/trpo.pt'
 INPUT_DIM = 3
 OUTPUT_DIM = 1
 EPISODE_LENGTH = 500
-EPISODE_NUM = 5000
-# BATCH_SIZE = 32
-GAMMA = 0.99
-TAU = 0.9
-VALUE_LR = 0.01
-FVP_DAMPING = 0.0005
-SOFT_UPDATE_TAU = 1 # doesn't work
-MAX_KL = 0.1
+EPISODE_NUM = 6000
+GAMMA = 0.9
+# TAU = 0.9
+VALUE_LR = 0.0001     # 0.01
+FVP_DAMPING = 0.01    # 0.0005
+SOFT_UPDATE_TAU = 1   # doesn't work
+MAX_KL = 0.01         # the smaller is better or 0.1
+FILE_PATH = 'episode-reward'
+NORM_FILTER_PICKLE_PATH = 'NormFilter'
+torch.manual_seed(2020)
 
 
 class Policy(nn.Module):
@@ -52,7 +55,7 @@ class Policy(nn.Module):
         s = torch.tanh(self.fc_2(s))
         mu = self.mu(s)
         log_std = 2 * torch.sigmoid(self.log_std).expand_as(mu)
-
+        # log_std = self.log_std.expand_as(mu)
         std = torch.exp(log_std)
         return mu, log_std, std
 
@@ -66,7 +69,7 @@ class Value(nn.Module):
         self.fc_3 = nn.Linear(64, 32)
         self.value = nn.Linear(32, OUTPUT_DIM)
         self.value.weight.data.mul_(0.1)
-        # self.value.weight.data.mul_(0.0)
+        # self.value.bias.data.mul_(0.0)
     
     def forward(self, s):
         s = torch.relu(self.fc_1(s))
@@ -134,32 +137,31 @@ class TRPO:
         values = self.value(states)
         values_prime = self.value(states_prime)
         returns = torch.empty((rewards.size(0), 1), dtype=torch.float)
-        deltas = torch.empty((rewards.size(0), 1), dtype=torch.float)
+        # deltas = torch.empty((rewards.size(0), 1), dtype=torch.float)
         advantages = torch.empty((rewards.size(0), 1), dtype=torch.float)
         prev_return = 0.0
-        prev_value = 0.0
-        prev_advantage = 0.0
+        # prev_advantage = 0.0
 
         # TD0
         for i in reversed(range(rewards.size(0))):
             # GAE(doesn't work)
-            # returns[i] = rewards[i] + GAMMA * prev_return * done_masks[i].item()
+            returns[i] = rewards[i] + GAMMA * prev_return * done_masks[i].item()
             # deltas[i] = rewards[i] + GAMMA * prev_value * done_masks[i].item() - values[i]
             # advantages[i] = deltas[i] + GAMMA * TAU * prev_advantage * done_masks[i].item()
 
-            returns[i] = rewards[i] + GAMMA * values_prime[i]
-            advantages[i] = rewards[i] + GAMMA * values_prime[i] - values[i]
+            # returns[i] = rewards[i] + GAMMA * values_prime[i]
+            advantages[i] = rewards[i] + GAMMA * values_prime[i] * done_masks[i].item() - values[i]
 
             prev_return = returns[i][0]
-            prev_value = values[i][0]
-            prev_advantage = advantages[i][0]
+            # prev_advantage = advantages[i][0]
 
         # update value net
         targets = returns
         v_loss = F.smooth_l1_loss(values, targets.detach())
         self.v_optimizer.zero_grad()
         v_loss.mean().backward()
-        self.v_optimizer.step()
+        for _ in range(10):
+            self.v_optimizer.step()
         # print('v_loss = ', v_loss.mean())
 
         # update policy net using TRPO
@@ -194,6 +196,9 @@ class TRPO:
 
 def train():
     env = gym.make('Pendulum-v0')
+    env.seed(2020)
+    fp = open(FILE_PATH, 'w')
+    pickle_file = open(NORM_FILTER_PICKLE_PATH, 'wb')
     norm_filter_state = NormFilter((INPUT_DIM,), clip=5)
     # norm_filter_reward = NormFilter((1,), decorate_mean=False, clip=10)
     trpo_model = TRPO()
@@ -225,26 +230,35 @@ def train():
         soft_update(trpo_model.pi, trpo_model.old_pi, SOFT_UPDATE_TAU)
         if n_epi % print_interval == 0 and n_epi != 0:
             print("# of episode :{}, avg score : {:.1f}".format(n_epi, score/print_interval))
+            fp.write("{}, {}\n".format(n_epi, score/print_interval))
             score = 0.0
 
     torch.save({
         'trpo_model_pi_dict': trpo_model.pi.state_dict(),
         'trpo_model_value_dict': trpo_model.value.state_dict(),
         }, SAVE_PATH)
+    pickle.dump(norm_filter_state, pickle_file)
 
     env.close()
+    fp.close()
+    pickle_file.close()
 
 
 def evaluate():
     env = gym.make('Pendulum-v0')
+    env.seed(2020)
     checkpoint = torch.load(SAVE_PATH)
     pi = Policy()
     pi.load_state_dict(checkpoint['trpo_model_pi_dict'])
     pi.eval()
+    pickle_file = open(NORM_FILTER_PICKLE_PATH, 'rb')
+    norm_filter_state = pickle.load(pickle_file)
+
     start = time.time()
     end = time.time()
     while end - start < 60:
         s = env.reset()
+        s = norm_filter_state(s, update=False)
         done = False
         reward_sum = 0
         while not done:
@@ -253,6 +267,7 @@ def evaluate():
             a = torch.normal(action_mean, action_std)
             a = a.detach()[0].numpy()
             s_prime, r, done, info = env.step(a)
+            s_prime = norm_filter_state(s_prime, update=False)
             env.render()
             s = s_prime
             reward_sum += r
@@ -260,6 +275,7 @@ def evaluate():
         end = time.time()
 
     env.close()
+    pickle_file.close()
 
 
 def main():
@@ -274,3 +290,12 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+'''
+CONCLUTION:
+    1. GAE doesn't work, because it has large variance, I think.
+    2. The MAX_KL constraint condition should be set as smaller as you can.
+    3. running_state algorithm (also is seen as normalization filter) may be helpful.
+    4. It's not promised that the deeper network is the better.
+'''
