@@ -79,28 +79,30 @@ class PPO:
             prev_return = return_lst[i][0]
         target = return_lst
         # TD0
-        advantage = rewards + gamma * self.vn(states_prime) * done_masks[i].item() - self.vn(states)
+        advantage = rewards + gamma * self.vn(states_prime) * done_masks.float() - self.vn(states)
         advantage = advantage.detach()
 
         # 更新策略网络
-        pi_mu, pi_log_std, pi_std = self.pi(states)
-        old_pi_mu, old_pi_log_std, old_pi_std = self.old_pi(states)
-        pi_log_distri = normal_log_distribution(actions, pi_mu, pi_log_std, pi_std)
-        old_pi_log_distri = normal_log_distribution(actions, old_pi_mu, old_pi_log_std, old_pi_std)
-        ratio = torch.exp(pi_log_distri - old_pi_log_distri)
-        surr1 = ratio * advantage
-        surr2 = torch.clamp(ratio, 1 - eps_clip, 1 + eps_clip) * advantage
-        aloss = -torch.min(surr1, surr2)
+
         for _ in range(pi_epoch):
+            pi_mu, pi_log_std, pi_std = self.pi(states)
+            old_pi_mu, old_pi_log_std, old_pi_std = self.old_pi(states)
+            pi_log_distri = normal_log_distribution(actions, pi_mu, pi_log_std, pi_std)
+            old_pi_log_distri = normal_log_distribution(actions, old_pi_mu, old_pi_log_std, old_pi_std)
+            ratio = torch.exp(pi_log_distri - old_pi_log_distri)
+            surr1 = ratio * advantage
+            surr2 = torch.clamp(ratio, 1 - eps_clip, 1 + eps_clip) * advantage
+            aloss = -torch.min(surr1, surr2)
             self.pi_optimizer.zero_grad()
-            aloss.mean().backward(retain_graph=True)
+            aloss.mean().backward()
             self.pi_optimizer.step()
 
         # 更新价值网络
-        closs = F.smooth_l1_loss(self.vn(states), target.detach())
+
         for _ in range(vn_epoch):
+            closs = F.smooth_l1_loss(self.vn(states), target.detach())
             self.vn_optimizer.zero_grad()
-            closs.mean().backward(retain_graph=True)
+            closs.mean().backward()
             self.vn_optimizer.step()
 
     def choose_action(self, x):
@@ -162,7 +164,8 @@ def evaluate():
         reward_sum = 0
         while not done:
             mu, _, std = policy(torch.from_numpy(s).float())
-            s_prime, r, done, info = env.step(mu.detach().numpy())
+            a = torch.normal(mu, std).detach().numpy()
+            s_prime, r, done, info = env.step(a)
             env.render()
             s = s_prime
             reward_sum += r
@@ -186,47 +189,7 @@ if __name__ == '__main__':
     main()
 
 '''
-1. 计算折扣回报的方式：
-    v_s_ = r + gamma * self.v(s_prime) * done_mask
-这种方式是计算每个折扣回报，v 网络都有参与估计 s_prime 的值
-
-更新计算折扣回报的方式：
-    v_s_ = self.v(s_prime)
-    v_s_ = r + gamma * v_s_ * done_mask
-这种方式只利用 v 网络估计当前状态
-
-第二种方式更好
------------
-
-2. 什么时候更新价值网络
-- 更新一次策略网络就更新一次价值网络
-
-- 更新完策略网络，再更新价值网络 
-
-目前用第二种方式
-----------------
-
-3. 策略网络和价值网络，更新迭代的次数设置为多少：
-- 设置相同，效果一般
-- 策略网络更新的次数多，效果不好
-- 价值网络更新的次数多，效果还行
------------------
-
-4. 动作值的范围忘了裁减了。。。。。这非常重要，裁剪到 [-2, 2]
-还有 mu 经过 tanh 函数激活后也要乘以 2 。。
-
------------------
-
-5. 计算折扣回报的时候，结束状态需不需要乘以 donemask ?
-不需要的效果会好很多。。。有可能只是特例而已
-!!!!!! 这个影响很大？为什么？？？结束状态难道不需要乘以 donemask 吗
-
------------------
-6. gamma 的取值也会影响收敛：
-如果不收敛，适当调小一点？
-
------------------
-7. geng xin bu neng zhi yong yi ge episode de bu fen shu ju
+要用一个episode的全部数据计算折扣回报
 '''
 
 
