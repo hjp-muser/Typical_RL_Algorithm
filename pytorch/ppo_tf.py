@@ -82,10 +82,10 @@ class PPO(object):
                     {self.tfs: s, self.tfa: a, self.tfadv: adv, self.tflam: METHOD['lam']})
                 if kl > 4*METHOD['kl_target']:  # this in in google's paper
                     break
-            if kl < METHOD['kl_target'] / 1.5:  # adaptive lambda, this is in OpenAI's paper
-                METHOD['lam'] /= 2
-            elif kl > METHOD['kl_target'] * 1.5:
-                METHOD['lam'] *= 2
+                if kl < METHOD['kl_target'] / 1.5:  # adaptive lambda, this is in OpenAI's paper
+                    METHOD['lam'] /= 2
+                elif kl > METHOD['kl_target'] * 1.5:
+                    METHOD['lam'] *= 2
             METHOD['lam'] = np.clip(METHOD['lam'], 1e-4, 10)    # sometimes explode, this clipping is my solution
         else:   # clipping method, find this is better (OpenAI's paper)
             [self.sess.run(self.atrain_op, {self.tfs: s, self.tfa: a, self.tfadv: adv}) for _ in range(A_UPDATE_STEPS)]
@@ -111,6 +111,7 @@ class PPO(object):
         if s.ndim < 2: s = s[np.newaxis, :]
         return self.sess.run(self.v, {self.tfs: s})[0, 0]
 
+
 env = gym.make('Pendulum-v0')
 ppo = PPO()
 all_ep_r = []
@@ -126,6 +127,7 @@ for ep in range(EP_MAX):
         t += 1
         a = ppo.choose_action(s)
         s_, r, done, _ = env.step(a)
+        env.render()
         buffer_s.append(s)
         buffer_a.append(a)
         buffer_r.append((r+8)/8)    # normalize reward, find to be useful

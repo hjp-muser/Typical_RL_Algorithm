@@ -27,13 +27,13 @@ SAVE_PATH = 'model/trpo.pt'
 INPUT_DIM = 3
 OUTPUT_DIM = 1
 EPISODE_LENGTH = 500
-EPISODE_NUM = 6000
+EPISODE_NUM = 10000
 GAMMA = 0.9
 # TAU = 0.9
-VALUE_LR = 0.0001     # 0.01
-FVP_DAMPING = 0.01    # 0.0005
-SOFT_UPDATE_TAU = 1   # doesn't work
-MAX_KL = 0.01         # the smaller is better or 0.1
+VALUE_LR = 0.0001       # 0.01
+FVP_DAMPING = 0.01      # 0.0005
+SOFT_UPDATE_TAU = 0.1   # 0.1 ~ 1
+MAX_KL = 0.01           # the smaller is better or 0.1
 FILE_PATH = 'episode-reward'
 NORM_FILTER_PICKLE_PATH = 'NormFilter'
 torch.manual_seed(2020)
@@ -44,15 +44,17 @@ class Policy(nn.Module):
     def __init__(self):
         super(Policy, self).__init__()
         self.fc_1 = nn.Linear(INPUT_DIM, 128)
-        self.fc_2 = nn.Linear(128, 32)
+        self.fc_2 = nn.Linear(128, 64)
+        self.fc_3 = nn.Linear(64, 32)
         self.mu = nn.Linear(32, OUTPUT_DIM)
         self.mu.weight.data.mul_(0.1)
         self.mu.bias.data.mul_(0.0)
         self.log_std = nn.Parameter(torch.zeros(1, OUTPUT_DIM, dtype=torch.float))
 
     def forward(self, s):
-        s = torch.tanh(self.fc_1(s))
+        s = torch.relu(self.fc_1(s))
         s = torch.tanh(self.fc_2(s))
+        s = torch.tanh(self.fc_3(s))
         mu = self.mu(s)
         log_std = 2 * torch.sigmoid(self.log_std).expand_as(mu)
         # log_std = self.log_std.expand_as(mu)

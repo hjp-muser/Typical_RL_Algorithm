@@ -1,156 +1,174 @@
 import gym
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
+import torch.nn.functional as F
 import argparse
+import numpy as np
+import time
+import sys
 
-#Hyperparameters
-learning_rate = 0.0001
-gamma         = 0.9
-lmbda         = 0.8
-eps_clip      = 0.1
-K_epoch       = 10
-T_horizon     = 32
+sys.path.append("..")
+
+from Utils.distribution import normal_log_distribution
+from Utils.memory import Memory
+
+pi_lr = 0.0001
+vn_lr = 0.0001
+gamma = 0.9
+eps_clip = 0.01
+pi_epoch = 10
+vn_epoch = 10
+batch_size = 128
 N = 5000
 SAVE_PATH = 'model/ppo.pt'
+torch.manual_seed(2020)
 
-class PPO(nn.Module):
-    def __init__(self,device):
-        super(PPO, self).__init__()
-        self.data = []
-        
-        self.fc_1 = nn.Linear(3,128)
-        self.fc_2 = nn.Linear(128, 32) 
-        # self.fc_3 = nn.Linear(256, 64)
-        # self.fc_4 = nn.Linear(64, 16)
-        self.fc_mu = nn.Linear(32, 1)
-        self.fc_v = nn.Linear(32, 1)
-        self.var = 1
-        self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
-        self.device = device
 
-    def pi(self, x):
-        x = x.to(self.device)
-        x = F.relu(self.fc_1(x))
-        x = F.relu(self.fc_2(x))
-        mu = self.fc_mu(x)
-        prob = torch.distributions.Normal(mu, self.var)
-        sample = prob.sample()
-        log_prob = prob.log_prob(sample)
-        a = torch.tanh(sample) * 2
-        return log_prob, a
+class Policy(nn.Module):
+    def __init__(self):
+        super(Policy, self).__init__()
+        self.fc1 = nn.Linear(3, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, 32)
+        self.mu = nn.Linear(32, 1)
+        self.log_std = nn.Parameter(torch.zeros(1, 1))
 
-    def v(self, x):
-        x = F.relu(self.fc_1(x))
-        x = F.relu(self.fc_2(x))
-        v = self.fc_v(x)
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.tanh(self.fc2(x))
+        x = torch.tanh(self.fc3(x))
+        mu = self.mu(x)
+        log_std = 2 * torch.sigmoid(self.log_std)
+        std = torch.exp(log_std)
+        return mu, log_std, std
+
+
+class Value(nn.Module):
+    def __init__(self):
+        super(Value, self).__init__()
+        self.fc1 = nn.Linear(3, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, 32)
+        self.value = nn.Linear(32, 1)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.sigmoid(self.fc2(x))
+        x = torch.relu(self.fc3(x))
+        v = self.value(x)
         return v
-      
-    def put_data(self, transition):
-        self.data.append(transition)
-        
-    def make_batch(self):
-        s_lst, a_lst, r_lst, s_prime_lst, log_prob_a_lst, done_lst = [], [], [], [], [], []
-        for transition in self.data:
-            s, a, r, s_prime, log_prob_a, done = transition
-            
-            s_lst.append(s)
-            a_lst.append([a])
-            r_lst.append([r])
-            s_prime_lst.append(s_prime)
-            log_prob_a_lst.append([log_prob_a])
-            done_mask = 0 if done else 1
-            done_lst.append([done_mask])
-            
-        s,a,r,s_prime,done_mask, log_prob_a = torch.tensor(s_lst, dtype=torch.float).to(self.device), \
-                                          torch.tensor(a_lst).to(self.device), \
-                                          torch.tensor(r_lst).to(self.device), \
-                                          torch.tensor(s_prime_lst, dtype=torch.float).to(self.device), \
-                                          torch.tensor(done_lst, dtype=torch.float).to(self.device), \
-                                          torch.tensor(log_prob_a_lst).to(self.device)
-        self.data = []
-        return s, a, r, s_prime, done_mask, log_prob_a
-        
+
+
+class PPO:
+    def __init__(self):
+        self.pi = Policy()
+        self.old_pi = Policy()
+        self.vn = Value()
+        self.pi_optimizer = optim.Adam(self.pi.parameters(), lr=pi_lr)
+        self.vn_optimizer = optim.Adam(self.vn.parameters(), lr=vn_lr)
+        self.memory = None
+
     def update(self):
-        s, a, r, s_prime, done_mask, log_prob_a = self.make_batch()
+        self.old_pi.load_state_dict(self.pi.state_dict())
+        states, actions, rewards, states_prime, done_masks = self.memory.sample_all()
+        return_lst = torch.zeros_like(rewards)
+        prev_return = 0.0
+        for i in reversed(range(rewards.size(0))):
+            return_lst[i] = rewards[i] + gamma * prev_return * done_masks[i].item()
+            prev_return = return_lst[i][0]
+        target = return_lst
+        # TD0
+        advantage = rewards + gamma * self.vn(states_prime) * done_masks[i].item() - self.vn(states)
+        advantage = advantage.detach()
 
-        for i in range(K_epoch):
-            td_target = r + gamma * self.v(s_prime) # * done_mask
+        # 更新策略网络
+        pi_mu, pi_log_std, pi_std = self.pi(states)
+        old_pi_mu, old_pi_log_std, old_pi_std = self.old_pi(states)
+        pi_log_distri = normal_log_distribution(actions, pi_mu, pi_log_std, pi_std)
+        old_pi_log_distri = normal_log_distribution(actions, old_pi_mu, old_pi_log_std, old_pi_std)
+        ratio = torch.exp(pi_log_distri - old_pi_log_distri)
+        surr1 = ratio * advantage
+        surr2 = torch.clamp(ratio, 1 - eps_clip, 1 + eps_clip) * advantage
+        aloss = -torch.min(surr1, surr2)
+        for _ in range(pi_epoch):
+            self.pi_optimizer.zero_grad()
+            aloss.mean().backward(retain_graph=True)
+            self.pi_optimizer.step()
 
-            delta = td_target - self.v(s)
-            delta = delta.detach().cpu().numpy()
-            advantage_lst = []
-            advantage = 0.0
-            for delta_t in delta[::-1]: # delta 逆序
-                advantage = gamma * lmbda * advantage + delta_t[0]
-                advantage_lst.append([advantage])
-            advantage_lst.reverse()
-            advantage = torch.tensor(advantage_lst, dtype=torch.float).to(self.device)
-            pi_log_prob, _ = self.pi(s)
-            ratio = torch.exp(pi_log_prob - log_prob_a)  # a/b == exp(log(a)-log(b))
+        # 更新价值网络
+        closs = F.smooth_l1_loss(self.vn(states), target.detach())
+        for _ in range(vn_epoch):
+            self.vn_optimizer.zero_grad()
+            closs.mean().backward(retain_graph=True)
+            self.vn_optimizer.step()
 
-            surr1 = ratio * advantage
-            surr2 = torch.clamp(ratio, 1-eps_clip, 1+eps_clip) * advantage
-            loss = -torch.min(surr1, surr2) + F.smooth_l1_loss(self.v(s), td_target.detach())
+    def choose_action(self, x):
+        x = x[np.newaxis, :]
+        mu, _, std = self.pi(torch.from_numpy(x).float())
+        a = torch.normal(mu, std)
+        return a
 
-            self.optimizer.zero_grad()
-            loss.mean().backward()
-            self.optimizer.step()
-        
-def train(device):
+
+def train():
     env = gym.make('Pendulum-v0')
-    model = PPO(device)
-    model.to(device)
+    env.seed(2020)
+    ppo_model = PPO()
     score = 0.0
     print_interval = 20
 
     for n_epi in range(N):
         s = env.reset()
-        done = False
-        while not done:
-            for t in range(T_horizon):
-                log_prob, a = model.pi(torch.from_numpy(s).float())
-                log_prob = log_prob.cpu()
-                a = a.cpu()
-                s_prime, r, done, info = env.step(a)
-                model.put_data((s, a, r, s_prime, log_prob, done))
-                s = s_prime
+        ppo_model.memory = Memory()
+        # while not done:
+        #     for _ in range(batch_size):
+        for t in range(500):
+            a = ppo_model.choose_action(s)
+            a = a.detach()[0].numpy()
+            s_prime, r, done, info = env.step(a)
+            done_mask = 0 if done else 1
+            ppo_model.memory.put((s, a, [(r + 8) / 8], s_prime, [done_mask]))
+            s = s_prime
+            score += r
+            if done:
+                break
+            # if (t+1) % batch_size == 0 or t == 200-1:
+            # ppo_model.update()
+        ppo_model.update()
 
-                score += r
-                if done:
-                    break
-
-            model.update()
-        if n_epi%print_interval==0 and n_epi!=0:
-            print("# of episode :{}, avg score : {:.1f}".format(n_epi, score/print_interval))
+        if n_epi % print_interval == 0 and n_epi != 0:
+            print("# of episode :{}, avg score : {:.1f}".format(n_epi, score / print_interval))
             score = 0.0
 
-#     torch.save({
-#         'ppo_model_dict': model.state_dict(),
-#         }, SAVE_PATH)
+    torch.save({
+        'ppo_policy_dict': ppo_model.pi.state_dict(),
+    }, SAVE_PATH)
 
     env.close()
 
 
 def evaluate():
     env = gym.make('Pendulum-v0')
+    env.seed(2020)
     checkpoint = torch.load(SAVE_PATH)
-    model = PPO()
-    model.load_state_dict(checkpoint['ppo_model_dict'])
-    model.eval()
-    while 1:
+    policy = Policy()
+    policy.load_state_dict(checkpoint['ppo_policy_dict'])
+    policy.eval()
+    start_time = time.time()
+    end_time = time.time()
+    while end_time - start_time < 60:
         s = env.reset()
         done = False
         reward_sum = 0
         while not done:
-            _, a = model.pi(torch.from_numpy(s).float()) 
-            s_prime, r, done, info = env.step([a.item()])
+            mu, _, std = policy(torch.from_numpy(s).float())
+            s_prime, r, done, info = env.step(mu.detach().numpy())
             env.render()
             s = s_prime
             reward_sum += r
         print('done! reward = ', reward_sum)
-        
+        end_time = time.time()
+
     env.close()
 
 
@@ -158,12 +176,57 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--train', action='store_true', help='training process')
     args = parser.parse_args()
-    device = torch.device("cpu" if torch.cuda.is_available() else "cpu")
     if args.train:
-        train(device)
+        train()
     else:
         evaluate()
 
 
 if __name__ == '__main__':
     main()
+
+'''
+1. 计算折扣回报的方式：
+    v_s_ = r + gamma * self.v(s_prime) * done_mask
+这种方式是计算每个折扣回报，v 网络都有参与估计 s_prime 的值
+
+更新计算折扣回报的方式：
+    v_s_ = self.v(s_prime)
+    v_s_ = r + gamma * v_s_ * done_mask
+这种方式只利用 v 网络估计当前状态
+
+第二种方式更好
+-----------
+
+2. 什么时候更新价值网络
+- 更新一次策略网络就更新一次价值网络
+
+- 更新完策略网络，再更新价值网络 
+
+目前用第二种方式
+----------------
+
+3. 策略网络和价值网络，更新迭代的次数设置为多少：
+- 设置相同，效果一般
+- 策略网络更新的次数多，效果不好
+- 价值网络更新的次数多，效果还行
+-----------------
+
+4. 动作值的范围忘了裁减了。。。。。这非常重要，裁剪到 [-2, 2]
+还有 mu 经过 tanh 函数激活后也要乘以 2 。。
+
+-----------------
+
+5. 计算折扣回报的时候，结束状态需不需要乘以 donemask ?
+不需要的效果会好很多。。。有可能只是特例而已
+!!!!!! 这个影响很大？为什么？？？结束状态难道不需要乘以 donemask 吗
+
+-----------------
+6. gamma 的取值也会影响收敛：
+如果不收敛，适当调小一点？
+
+-----------------
+7. geng xin bu neng zhi yong yi ge episode de bu fen shu ju
+'''
+
+

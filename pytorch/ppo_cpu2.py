@@ -1,9 +1,8 @@
 import gym
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-from torch.autograd import Variable
+import torch.nn.functional as F
 import argparse
 import numpy as np
 
@@ -19,41 +18,42 @@ batch_size = 32
 N = 5000
 SAVE_PATH = 'model/ppo.pt'
 
-class PI(nn.Module):
+class Policy(nn.Module):
     def __init__(self):
-        super(PI, self).__init__()
+        super(Policy, self).__init__()
         self.fc_1 = nn.Linear(3, 128)
         self.fc_2 = nn.Linear(128, 32)
         self.fc_mu = nn.Linear(32, 1)
         self.fc_sigma = nn.Linear(32, 1)
     
     def forward(self, x):
-        x = F.relu(self.fc_1(x))
-        x = F.relu(self.fc_2(x))
-        mu = torch.tanh(self.fc_mu(x)) * 2
-        sigma = F.softplus(self.fc_sigma(x))
+        x = torch.relu(self.fc_1(x))
+        x = torch.relu(self.fc_2(x))
+        mu = torch.tanh(self.fc_mu(x))
+        sigma = torch.softplus(self.fc_sigma(x))
         pi_dist = torch.distributions.Normal(mu, sigma)
         return pi_dist
 
-class VN(nn.Module):
+class Value(nn.Module):
     def __init__(self):
-        super(VN, self).__init__()
+        super(Value, self).__init__()
         self.fc_1 = nn.Linear(3, 128)
         self.fc_2 = nn.Linear(128, 32)
+        # self.fc_3 = nn.Linear(64, 32)
         self.fc_v = nn.Linear(32, 1)
     
     def forward(self, x):
-        x = F.relu(self.fc_1(x))
-        x = F.relu(self.fc_2(x))
+        x = torch.relu(self.fc_1(x))
+        x = torch.relu(self.fc_2(x))
         v = self.fc_v(x)
         return v
 
 class PPO():
     def __init__(self):
         self.data = []
-        self.pi = PI()
-        self.old_pi = PI()
-        self.vn = VN()
+        self.pi = Policy()
+        self.old_pi = Policy()
+        self.vn = Value()
         self.pi_optimizer = optim.Adam(self.pi.parameters(), lr=pi_lr)
         self.vn_optimizer = optim.Adam(self.vn.parameters(), lr=vn_lr)
       
@@ -117,7 +117,7 @@ class PPO():
             self.pi_optimizer.step()
         # 更新价值网络
         for _ in range(vn_epoch):
-            closs = F.mse_loss(self.vn(s) , td_target.detach())
+            closs = F.smooth_l1_loss(self.vn(s), td_target.detach())
             # closs = F.smooth_l1_loss(self.vn(s) , td_target.detach())
             self.vn_optimizer.zero_grad()
             closs.mean().backward()
